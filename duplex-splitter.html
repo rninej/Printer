@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Duplex Print Splitter</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--ink:#1d1d1b;--mut:#6b6a64;--line:#dcdad2;--acc:#2f5d50;--accink:#fff;--warn:#9a3b1f;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161715;--card:#202220;--ink:#f0efe9;--mut:#a09f97;--line:#363834;--acc:#7fc4ae;--accink:#10201a;--warn:#f0a07f}}
+:root[data-theme="dark"]{--bg:#161715;--card:#202220;--ink:#f0efe9;--mut:#a09f97;--line:#363834;--acc:#7fc4ae;--accink:#10201a;--warn:#f0a07f}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:28px 18px 48px}
+h1{font:600 26px/1.2 Georgia,"Times New Roman",serif;margin:0 0 6px}
+p.sub{color:var(--mut);margin:0 0 22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+#drop{border:2px dashed var(--line);border-radius:14px;padding:34px 16px;text-align:center;cursor:pointer;background:var(--card);transition:border-color .15s}
+#drop.over,#drop:hover{border-color:var(--acc)}
+#drop b{display:block;font-size:17px;margin-bottom:4px}
+#drop span{color:var(--mut);font-size:14px}
+label.opt{display:flex;gap:10px;align-items:flex-start;font-size:15px}
+label.opt input{margin-top:4px;width:18px;height:18px;accent-color:var(--acc)}
+label.opt small{display:block;color:var(--mut)}
+button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:12px 16px;background:var(--acc);color:var(--accink);cursor:pointer;width:100%}
+button:disabled{opacity:.5}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>div{flex:1 1 220px}
+.lbl{font-size:13px;color:var(--mut);margin:0 0 6px}
+#status{color:var(--mut);font-size:14px;min-height:21px;margin:0 0 12px}
+#status.err{color:var(--warn)}
+ol{padding-left:20px;margin:8px 0 0}li{margin-bottom:6px}
+.hide{display:none}
+.note{font-size:13px;color:var(--mut)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Duplex Print Splitter</h1>
+  <p class="sub">Upload a PDF or Word file. Get one file for the front sides and one for the back sides, so any printer can print double-sided. Everything stays in your browser.</p>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Choose a file">
+    <b>Drop a PDF or DOCX here, or tap to choose</b>
+    <span id="fname">Handles damaged, encrypted and scanned PDFs too</span>
+    <input id="file" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hide">
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <label class="opt"><input type="checkbox" id="rev" checked>
+      <span>Reverse the back sides<small>Right for most printers that stack pages face-down. If a test print comes out in the wrong order, untick this and run it again.</small></span>
+    </label>
+  </div>
+
+  <p id="status" role="status"></p>
+
+  <div id="result" class="hide">
+    <div class="card">
+      <div class="row">
+        <div><p class="lbl" id="fl">Step 1</p><button id="dlF">Download front sides</button></div>
+        <div id="bwrap"><p class="lbl" id="bl">Step 2</p><button id="dlB">Download back sides</button></div>
+      </div>
+      <ol id="how">
+        <li>Print the <b>front sides</b> file, one-sided.</li>
+        <li>Put the printed stack back in the tray so the blank side gets printed on.</li>
+        <li>Print the <b>back sides</b> file, one-sided.</li>
+      </ol>
+      <p class="note" style="margin-bottom:0">Tip: test with a 4-page document first to confirm the orientation your printer needs.</p>
+    </div>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.3/dist/docx-preview.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const {PDFDocument} = PDFLib;
+let last = null; // {buf, name}
+let outputs = null;
+
+try { pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; } catch (e) {}
+
+function say(m, err) { const s = $("#status"); s.textContent = m || ""; s.className = err ? "err" : ""; }
+const tick = () => new Promise(r => setTimeout(r, 0));
+const jpgBytes = c => new Promise(r => c.toBlob(b => b.arrayBuffer().then(r), "image/jpeg", 0.88));
+
+/* Render every page of a PDF to images and rebuild it: works on damaged or odd PDFs that pdf-lib cannot copy. */
+async function rasterize(buf) {
+  const task = pdfjsLib.getDocument({data: new Uint8Array(buf.slice(0)), stopAtErrors: false});
+  task.onPassword = (cb, reason) => {
+    const p = prompt(reason === 2 ? "Wrong password. Try again:" : "This PDF needs a password:");
+    if (p === null) task.destroy(); else cb(p);
+  };
+  const pdf = await task.promise;
+  const out = await PDFDocument.create();
+  let bad = 0;
+  for (let i = 1; i <= pdf.numPages; i++) {
+    say(`Rebuilding page ${i} of ${pdf.numPages}…`);
+    await tick();
+    let size = [595, 842];
+    try {
+      const page = await pdf.getPage(i);
+      const v1 = page.getViewport({scale: 1});
+      size = [v1.width, v1.height];
+      const sc = Math.min(2, 2600 / Math.max(v1.width, v1.height));
+      const vp = page.getViewport({scale: sc});
+      const c = document.createElement("canvas");
+      c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({canvasContext: ctx, viewport: vp}).promise;
+      const img = await out.embedJpg(await jpgBytes(c));
+      out.addPage(size).drawImage(img, {x: 0, y: 0, width: size[0], height: size[1]});
+    } catch (e) { bad++; out.addPage(size); }
+  }
+  if (!out.getPageCount()) throw new Error("No readable pages");
+  return {bytes: await out.save(), bad};
+}
+
+async function docxToPdf(buf) {
+  const host = document.createElement("div");
+  host.style.cssText = "position:absolute;left:-10000px;top:0;background:#fff";
+  document.body.appendChild(host);
+  try {
+    await docx.renderAsync(buf.slice(0), host, null, {inWrapper: false, breakPages: true, ignoreLastRenderedPageBreak: false});
+    try { await document.fonts.ready; } catch (e) {}
+    const secs = [...host.querySelectorAll("section.docx")];
+    if (!secs.length) throw new Error("Empty document");
+    const out = await PDFDocument.create();
+    for (let i = 0; i < secs.length; i++) {
+      say(`Converting Word page ${i + 1} of ${secs.length}…`);
+      await tick();
+      const s = secs[i];
+      const c = await html2canvas(s, {scale: 2, backgroundColor: "#fff", useCORS: true});
+      const img = await out.embedJpg(await jpgBytes(c));
+      const w = s.offsetWidth * 0.75, h = s.offsetHeight * 0.75;
+      out.addPage([w, h]).drawImage(img, {x: 0, y: 0, width: w, height: h});
+    }
+    return await out.save();
+  } finally { host.remove(); }
+}
+
+async function openDoc(buf) {
+  try {
+    const d = await PDFDocument.load(buf, {ignoreEncryption: true, throwOnInvalidObject: false, updateMetadata: false});
+    if (d.isEncrypted || !d.getPageCount()) throw new Error("fallback");
+    return {doc: d, raster: false, bad: 0};
+  } catch (e) { return fromRaster(buf); }
+}
+async function fromRaster(buf) {
+  const r = await rasterize(buf);
+  return {doc: await PDFDocument.load(r.bytes), raster: true, bad: r.bad};
+}
+
+async function build(src, idx, blank) {
+  const out = await PDFDocument.create();
+  const real = idx.filter(i => i >= 0);
+  let pages;
+  try { pages = await out.copyPages(src, real); }
+  catch (e) { pages = []; for (const i of real) pages.push((await out.copyPages(src, [i]))[0]); }
+  const map = new Map(real.map((v, k) => [v, pages[k]]));
+  for (const i of idx) out.addPage(i < 0 ? blank : map.get(i));
+  return out.save();
+}
+async function split(src, rev) {
+  const n = src.getPageCount(), odd = [], even = [];
+  for (let i = 0; i < n; i++) (i % 2 ? even : odd).push(i);
+  if (n > 1 && n % 2) even.push(-1);
+  if (rev) even.reverse();
+  const sz = src.getPage(n - 1).getSize();
+  const blank = [sz.width, sz.height];
+  return {n, front: await build(src, odd, blank), back: n > 1 ? await build(src, even, blank) : null};
+}
+
+async function run() {
+  if (!last) return;
+  $("#result").classList.add("hide");
+  try {
+    let buf = last.buf, bytes = new Uint8Array(buf);
+    const head = String.fromCharCode(...bytes.slice(0, 1024));
+    const isPdf = head.includes("%PDF");
+    const isZip = head.startsWith("PK");
+    if (!isPdf) {
+      if (isZip && /\.docx$/i.test(last.file)) { say("Converting Word document…"); buf = (await docxToPdf(buf)).buffer; }
+      else if (/\.doc$/i.test(last.file)) throw new Error("Old .doc files aren’t supported. Save it as .docx or PDF first.");
+      else throw new Error("That doesn’t look like a PDF or DOCX file.");
+    }
+    say("Reading pages…");
+    await tick();
+    let r = await openDoc(buf), res;
+    try { res = await split(r.doc, $("#rev").checked); }
+    catch (e) { if (r.raster) throw e; r = await fromRaster(buf); res = await split(r.doc, $("#rev").checked); }
+    outputs = {res, name: last.name};
+    show(res, r);
+  } catch (e) {
+    say(e && e.message ? e.message : "Couldn’t read that file.", true);
+  }
+}
+
+function show(res, r) {
+  const n = res.n;
+  let msg = `${n} page${n === 1 ? "" : "s"} ready.`;
+  if (r.raster) msg += " This file needed repair, so pages were rebuilt as images (text won’t be selectable).";
+  if (r.bad) msg += ` ${r.bad} unreadable page${r.bad === 1 ? "" : "s"} left blank.`;
+  if (n > 1 && n % 2) msg += " A blank back was added for the last sheet.";
+  say(msg);
+  $("#bwrap").classList.toggle("hide", !res.back);
+  $("#how").classList.toggle("hide", !res.back);
+  $("#fl").textContent = res.back ? "Step 1" : "Single page";
+  $("#bl").textContent = "Step 2";
+  $("#result").classList.remove("hide");
+}
+
+async function save(bytes, fn) {
+  const blob = new Blob([bytes], {type: "application/pdf"});
+  let d = null;
+  try { d = window.claude && claude.use ? await claude.use("downloads") : null; } catch (e) {}
+  if (!d) {
+    // Standalone browser (e.g. downloaded .html file): normal download link
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = fn;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    return;
+  }
+  try { await d.save({filename: fn, data: blob}); }
+  catch (e) { if (!e || e.code !== "declined") say("Couldn’t save: " + (e && e.message || "unknown error"), true); }
+}
+$("#dlF").onclick = () => outputs && save(outputs.res.front, outputs.name + (outputs.res.back ? " - front sides.pdf" : ".pdf"));
+$("#dlB").onclick = () => outputs && outputs.res.back && save(outputs.res.back, outputs.name + " - back sides.pdf");
+
+async function pick(f) {
+  if (!f) return;
+  $("#fname").textContent = f.name;
+  outputs = null;
+  last = {buf: await f.arrayBuffer(), name: f.name.replace(/\.[^.]+$/, ""), file: f.name};
+  run();
+}
+const drop = $("#drop"), inp = $("#file");
+drop.onclick = () => inp.click();
+drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inp.click(); } };
+inp.onchange = () => { pick(inp.files[0]); inp.value = ""; };
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => pick(e.dataTransfer.files[0]));
+$("#rev").onchange = () => { if (last) run(); };
+</script>
+</body>
+</html>
